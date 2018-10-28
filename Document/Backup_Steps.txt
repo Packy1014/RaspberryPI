@@ -1,0 +1,142 @@
+1.首先安装必需的工具软件：
+sudo apt-get install dosfstools dump parted kpartx
+
+2.建立工作目录：
+mkdir ~/backupimg
+cd ~/backupimg
+
+3.生成空白img文件：
+插入装有源SD卡的读卡器到USB口后，确定源SD卡对应的设备名：
+ls /dev/sd*
+--/dev/sda  /dev/sda1  /dev/sda2
+如上所示/dev/sda为源SD卡，/dev/sda1为/boot，/dev/sda2为/（根）。不同的系统会有所不同，可能会是sdb… 或其他
+
+挂载源SD卡
+mkdir src_boot src_Root
+sudo mount -t vfat -o uid=pi,gid=pi,umask=0000 /dev/sda1 ./src_boot/（这里把文件夹拥有者和拥有组都设为当前用户pi，方便读写）
+sudo mount -t ext4 /dev/sda2 ./src_Root/
+
+查看源SD卡已用空间大小
+df -h
+--/dev/sda1        56M   21M   36M  37% /home/pi/backupimg/src_boot
+--/dev/sda2        15G  4.0G  9.9G  29% /home/pi/backupimg/src_Root
+如上可以看出/dev/sda已用空间大约4G，那么建立一个4600M的空白img文件应该够了。（安全起见，设定为已使用空间的1.3倍较好）
+sudo dd if=/dev/zero of=raspberrypi.img bs=1M count=4600
+
+然后给img文件分区
+sudo parted raspberrypi.img --script -- mklabel msdos
+sudo parted raspberrypi.img --script -- mkpart primary fat32 8192s 122479s
+sudo parted raspberrypi.img --script -- mkpart primary ext4 122880s -1
+分区的起始扇区数都是 8192 的倍数，以保证4k对齐
+
+检查分区是否成功
+在parted程序中，输入print free命令可以显示分区内容，输入quit退出
+--pi@raspberrypi:~/backupimg $ sudo parted raspberrypi.img
+--GNU Parted 3.2
+--Using /home/pi/backupimg/raspberrypi.img
+--Welcome to GNU Parted! Type 'help' to view a list of commands.
+--(parted) print free                                                       
+--Model:  (file)
+--Disk /home/pi/backupimg/raspberrypi.img: 4823MB
+--Sector size (logical/physical): 512B/512B
+--Partition Table: msdos
+--Disk Flags: 
+-- Number  Start   End     Size    Type     File system  Flags
+--        16.4kB  4194kB  4178kB           Free Space
+-- 1      4194kB  62.7MB  58.5MB  primary               lba
+--        62.7MB  62.9MB  205kB            Free Space
+-- 2      62.9MB  4822MB  4759MB  primary
+--        4822MB  4823MB  1049kB           Free Space
+
+4.挂载img文件到系统
+img文件对应的Loop device的设置，回环设备就是在磁盘上再虚拟出一套磁盘系统，对该系统的读写都不会影响原来的系统
+sudo losetup -f --show raspberrypi.img
+--/dev/loop0
+下面的命令中相应输入/dev/loop0，如果不是loop0请做相应调整（以及以后的各个步骤里的loop0都要改变）
+sudo kpartx -va /dev/loop0
+此时loop device就设置好了，loop0p1对应的是img文件分区上的/boot，loop0p2对应的是/（根）
+
+
+接着给img文件中的两个分区格式化
+sudo mkfs.vfat -n boot /dev/mapper/loop0p1
+sudo mkfs.ext4 /dev/mapper/loop0p2
+
+挂载目标img文件loop device
+mkdir tgt_boot tgt_Root
+sudo mount -t vfat -o uid=pi,gid=pi,umask=0000 /dev/mapper/loop0p1 ./tgt_boot/
+sudo mount -t ext4 /dev/mapper/loop0p2 ./tgt_Root/
+
+5.备份/boot
+首先备份/boot，直接拷贝即可
+sudo cp -rfp ./src_boot/* ./tgt_boot/
+
+6.备份/root
+备份根文件系统稍微复杂些，可以用两种方法
+(1)dump/restore方法，已验证
+首先对目标挂载点设置合适的权限，并清空
+sudo chmod 777 tgt_Root
+sudo chown pi.pi tgt_Root
+sudo rm -rf ./tgt_Root/*
+cd tgt_Root
+然后开始备份
+sudo dump -0uaf - ../src_Root/ | sudo restore -rf -
+然后返回上层目录
+cd ..
+
+(2)tar方法
+如果上述方法一的 sudo dump … 那一步出现 Broken pipe、 Illegal instruction等错误而失败的话，可以使用方法二
+这个方法会使用tar把源SD卡的根文件系统打包，所以在本机系统空间里需要额外的和源SD卡的根文件系统已用空间大小一样的可用空间
+首先，和方法一里面一样，对目标挂载点设置合适的权限，并清空
+sudo chmod 777 tgt_Root
+sudo chown pi.pi tgt_Root
+sudo rm -rf ./tgt_Root/*
+然后用tar把源SD卡的根文件系统打包
+cd src_Root/
+sudo tar pcf ../backup.tar .
+tar的过程中可能会出现一些 socket ignored 错误，可以忽略。上述打包过程结束后，接着将tar包解开到目标img文件的根文件系统
+cd ../tgt_Root/
+sudo tar pxf ../backup.tar
+解包过程结束后，回到上层目录，并删除backup.tar文件
+cd ..
+sudo rm backup.tar
+
+7.相应修改PARTUUID设定
+这时候整个备份就已经完成了。不过此时的img文件即使写入到空白SD卡里面也是无法启动的，因为Raspbian启动要对应分区的PARTUUID，所以我们还要修改目标img文件里的如下两个文件：
+./tgt_boot/cmdline.txt 
+./tgt_Root/etc/fstab 
+
+首先查看img文件对应的loop device的两个分区的PARTUUID
+--pi@raspberrypi:~/backupimg $ sudo blkid
+--/dev/mmcblk0p1: LABEL="boot" UUID="E5B7-FEA1" TYPE="vfat" PARTUUID="ddffe93a-01"
+--/dev/mmcblk0p2: UUID="b4ea8e46-fe87-4ddd-9e94-506c37005ac5" TYPE="ext4" PARTUUID="ddffe93a-02"
+--/dev/sda2: UUID="9a7608bd-5bff-4dfc-ac1d-63a956744162" TYPE="ext4" PARTUUID="ec04fe79-02"
+--/dev/loop0: PTUUID="af2f8761" PTTYPE="dos"
+--/dev/mmcblk0: PTUUID="ddffe93a" PTTYPE="dos"
+--/dev/sda1: LABEL="boot" UUID="B60A-B262" TYPE="vfat" PARTUUID="ec04fe79-01"
+--/dev/mapper/loop0p1: SEC_TYPE="msdos" LABEL="boot" UUID="755C-C29C" TYPE="vfat" PARTUUID="af2f8761-01"
+--/dev/mapper/loop0p2: UUID="a174c97e-049f-4fbd-abb7-0b9098dae24a" TYPE="ext4" PARTUUID="af2f8761-02"
+这里可以看到/boot对应的是af2f8761-01 ， / 对应的是af2f8761-02
+
+修改 cmdline.txt 文件
+sudo vi ./tgt_boot/cmdline.txt
+--pi@raspberrypi:~/backupimg $ cat ./tgt_boot/cmdline.txt 
+--dwc_otg.lpm_enable=0 console=serial0,115200 console=tty1 root=PARTUUID=af2f8761-02 rootfstype=ext4 elevator=deadline fsck.repair=yes rootwait
+
+修改 fstab 文件
+sudo vi ./tgt_Root/etc/fstab 
+--pi@raspberrypi:~/backupimg $ cat ./tgt_Root/etc/fstab 
+--proc            /proc           proc    defaults          0       0
+--PARTUUID=af2f8761-01  /boot           vfat    defaults          0       2
+--PARTUUID=af2f8761-02  /               ext4    defaults,noatime  0       1
+
+8.卸载各个挂载的分区
+sudo umount src_boot src_Root tgt_boot tgt_Root
+
+9.删除loop device
+sudo kpartx -d /dev/loop0
+sudo losetup -d /dev/loop0
+
+10.删除挂载点目录
+rmdir src_boot src_Root tgt_boot tgt_Root
+
+11.完成之后可以用dd或者Etcher烧写img文件到其他SD卡中，注意烧写到新卡中在树莓派中运行后，要先用raspi-config先把分区空间expand一下，否则可用空间会很小

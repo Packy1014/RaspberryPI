@@ -1,0 +1,22 @@
+1．查看USB号
+执行命令：ls -l /sys/class/tty
+--pi@raspberrypi:~ $ ls -l /sys/class/tty | grep ttyUSB0
+--lrwxrwxrwx 1 root root 0 Sep  5 09:24 ttyUSB0 -> ../../devices/platform/soc/3f980000.usb/usb1/1-1/1-1.3/1-1.3:1.0/ttyUSB0/tty/ttyUSB0
+上面1-1.3就是其端口号，不论怎样插拔USB，端口自身都是上面的编号，因此，只要给这几个编号指定别名就可以了
+
+2．编辑配置文件
+执行命令：sudo vim /etc/udev/rules.d/99-com.rules 
+在文件末尾加入下面内容，给该端口指定别名nick_name
+KERNEL=="ttyUSB*", KERNELS=="1-1.3", MODE:= "0777", SYMLINK+="nick_name"
+
+3．重启服务
+执行命令：sudo /etc/init.d/udev restart
+
+4．查看结果
+执行命令：ls -l /dev |grep ttyUSB
+--pi@raspberrypi:~ $ ls -l /dev |grep ttyUSB
+--lrwxrwxrwx 1 root root           7 Sep  5 09:19 rwh -> ttyUSB0
+--crwxrwxrwx 1 root dialout 188,   0 Sep  5 09:19 ttyUSB0
+
+5.程序中访问：
+serial.Serial('/dev/nick_name',9600) 
