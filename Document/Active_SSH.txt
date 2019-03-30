@@ -1,4 +1,0 @@
-开机自启SSH服务,配置openssh-server开机自动启动
-sudo nano /etc/rc.local文件，在exit 0语句前加入：/etc/init.d/ssh start
-Ctrl+O 保存
-Ctrl+X  退出
